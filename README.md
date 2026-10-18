@@ -24,9 +24,10 @@ Inspired by [jianzhichun/abaqus-mcp-server](https://github.com/jianzhichun/abaqu
 }
 ```
 
-## Tool
+## Tools
 
-`execute_script(python_code, timeout=600)` returns `[OK]` or `[FAILED]` followed by the script's output. Scripts run on Abaqus's own Python (2.7 in 6.14).
+- `execute_script(python_code, timeout=600)` returns `[OK]` or `[FAILED]` followed by the script's output. Scripts run on Abaqus's own Python (2.7 in 6.14).
+- `describe(path)` is a read-only API lookup in the live session: docstring with the signature, `__members__`, repository keys and methods, e.g. `describe("mdb.models['Model-1'].HeatTransferStep")`. Only attribute and `[key]` paths are accepted, no calls. The installed Abaqus is the reference, which matters because the scripting API differs between versions.
 
 ```python
 j = mdb.jobs['Thermal2D']

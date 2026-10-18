@@ -1,6 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 import json
 import os
+import re
 import time
 import uuid
 
@@ -24,7 +25,7 @@ def _bridge_alive() -> bool:
 
 @mcp.tool(
     name="execute_script",
-    description="Executes Python 2.7 code in the running Abaqus/CAE session (kernel, same namespace as the CAE command line, so mdb, session and variables from earlier calls are available). Returns everything the script printed plus the traceback if it failed."
+    description="Executes Python 2.7 code in the running Abaqus/CAE session (kernel, same namespace as the CAE command line, so mdb, session and variables from earlier calls are available). Returns everything the script printed plus the traceback if it failed. Check unfamiliar API with the describe tool first."
 )
 def execute_script(python_code: str, timeout: float = 600.0) -> str:
     """
@@ -64,6 +65,43 @@ def execute_script(python_code: str, timeout: float = 600.0) -> str:
     return f"[{status}]\n{result['output']}".rstrip()
 
 
+# Names, attribute access and [index] / ['key'] lookups only: no calls, so describe cannot change the model.
+DESCRIBE_PATH = re.compile(r"""[A-Za-z_]\w*(\.[A-Za-z_]\w*|\[(\d+|'[^'\\]*'|"[^"\\]*")\])*""")
+
+# Runs in the kernel (Python 2.7 or 3); wrapped in a function so it leaves no names in the CAE namespace.
+DESCRIBE_CODE = """\
+def _mcp_describe(o):
+    print('TYPE: ' + type(o).__name__)
+    doc = getattr(o, '__doc__', None)
+    if doc:
+        print('DOC: ' + str(doc).strip())
+    members = [m for m in getattr(o, '__members__', None) or [] if not m.startswith('_')]
+    if members:
+        print('MEMBERS: ' + ', '.join(sorted(members)))
+    if hasattr(o, 'keys'):
+        try:
+            print('KEYS: ' + ', '.join(str(k) for k in o.keys()))
+        except Exception:
+            pass
+    print('METHODS: ' + ', '.join(n for n in dir(o) if not n.startswith('_') and n not in members and callable(getattr(o, n, None))))
+try:
+    _mcp_describe(%s)
+finally:
+    del _mcp_describe
+"""
+
+
+@mcp.tool(
+    name="describe",
+    description="Read-only lookup of the Abaqus scripting API in the running session: signature/docstring, attributes (__members__), repository keys and methods of an object. Takes a path like mdb.models['Model-1'].HeatTransferStep, mdb.models['Model-1'].steps or mesh.ElemType (no calls). Use it before calling a method you are not sure about: the installed Abaqus version is authoritative, not memory."
+)
+def describe(path: str) -> str:
+    path = path.strip()
+    if not DESCRIBE_PATH.fullmatch(path):
+        return "Invalid path: use names, attributes and ['key'] / [index] lookups only, e.g. mdb.models['Model-1'].parts"
+    return execute_script(DESCRIBE_CODE % path, timeout=60)
+
+
 @mcp.prompt()
 def abaqus_scripting_strategy() -> str:
     """Guidance for driving Abaqus/CAE through this server."""
@@ -75,8 +113,10 @@ def abaqus_scripting_strategy() -> str:
        GUI and variables persist between calls. `mdb`, `session` and abaqusConstants are already imported.
     3. The result starts with [OK] or [FAILED] followed by everything printed and the traceback.
        Print what you need to verify (counts, names, values) instead of assuming success.
-    4. Build models in small steps and check each one; avoid scripts that wait for user input.
-    5. Submitting a job (`mdb.jobs[...].submit()`) returns immediately; use
+    4. Do not rely on memory for method names and arguments: the API changed between Abaqus versions.
+       Call `describe` on the method or object first (e.g. mdb.models['M'].HeatTransferStep).
+    5. Build models in small steps and check each one; avoid scripts that wait for user input.
+    6. Submitting a job (`mdb.jobs[...].submit()`) returns immediately; use
        `mdb.jobs[...].waitForCompletion()` when you need the results in the same call.
     """
 

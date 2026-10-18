@@ -29,7 +29,8 @@ class TestExecuteScript(unittest.TestCase):
     def run_job(self, run, out):
         kernel["_mcp_run"](run, out, self.namespace)
 
-    def execute(self, code, run_job=None, timeout=5):
+    def bridged(self, call, run_job=None):
+        """Run call() while a thread plays the Abaqus plug-in's timer."""
         stop = threading.Event()
 
         def loop():
@@ -40,10 +41,16 @@ class TestExecuteScript(unittest.TestCase):
         t = threading.Thread(target=loop)
         t.start()
         try:
-            return mcp_server.execute_script(code, timeout=timeout)
+            return call()
         finally:
             stop.set()
             t.join()
+
+    def execute(self, code, run_job=None, timeout=5.0):
+        return self.bridged(lambda: mcp_server.execute_script(code, timeout=timeout), run_job)
+
+    def describe(self, path):
+        return self.bridged(lambda: mcp_server.describe(path))
 
     def test_output_and_cleanup(self):
         res = self.execute("print('zażółć', 6 * 7)")
@@ -71,6 +78,28 @@ class TestExecuteScript(unittest.TestCase):
         # the bridge holds the job for 1 s, longer than the 0.5 s timeout
         res = self.execute("x = 1", run_job=lambda run, out: threading.Event().wait(1), timeout=0.5)
         self.assertIn("still running", res)
+
+    def test_describe_lists_doc_members_keys_and_methods(self):
+        class Step:
+            """Model.Step(name, previous) -> creates a Step."""
+            __members__ = ["name", "previous"]
+            name, previous = "Heat", "Initial"
+            def keys(self):
+                return ["a"]
+            def setValues(self):
+                pass
+        self.namespace["mdb"] = {"Heat": Step()}
+        res = self.describe("mdb['Heat']")
+        self.assertTrue(res.startswith("[OK]\nTYPE: Step"))
+        self.assertIn("DOC: Model.Step(name, previous)", res)
+        self.assertIn("MEMBERS: name, previous", res)
+        self.assertIn("KEYS: a", res)
+        self.assertIn("setValues", res)
+        self.assertNotIn("_mcp_describe", self.namespace)
+
+    def test_describe_rejects_calls(self):
+        for path in ["mdb.Model(name='x')", "__import__('os').remove('f')", "a; b", "a[b]"]:
+            self.assertTrue(mcp_server.describe(path).startswith("Invalid path"), path)
 
     @patch.object(mcp_server, "PICKUP_TIMEOUT", 0.3)
     def test_no_bridge_removes_job(self):
