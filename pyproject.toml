@@ -1,0 +1,10 @@
+[project]
+name = "abaqus-mcp-server"
+version = "0.2.0"
+description = "MCP server that runs Python scripts inside a live Abaqus/CAE session"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]<2",
+]

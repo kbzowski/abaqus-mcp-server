@@ -1,5 +1,0 @@
-mcp[cli]
-pywinauto
-pygetwindow
-psutil
-pywin32
