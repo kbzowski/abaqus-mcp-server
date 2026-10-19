@@ -1,11 +1,8 @@
-# Abaqus/CAE GUI plug-in (Python 2.7): runs scripts dropped by mcp_server.py into
-# ~/.abaqus_mcp inside this CAE session and writes their output back as JSON.
-# Install: copy this file and mcp_kernel.py to ~/abaqus_plugins/ and restart Abaqus/CAE.
 import glob, json, os, time, traceback
 
 try:
     from abaqusGui import *
-except ImportError:  # outside Abaqus (tests): only poll_once is used
+except ImportError:
     FXObject = None
 
 SPOOL = os.path.join(os.path.expanduser('~'), '.abaqus_mcp')
@@ -29,15 +26,14 @@ def _write_error(out, msg):
 
 
 def poll_once(spool, run_job):
-    """Refresh the heartbeat and run every pending job_<id>.py via run_job(run_path, out_path)."""
     with open(os.path.join(spool, 'heartbeat'), 'w') as f:
         f.write(str(time.time()))
     for job in sorted(glob.glob(os.path.join(spool, 'job_*.py'))):
         base = job[:-3]
         run, out = base + '.run', base + '.json'
         try:
-            os.rename(job, run)  # marks the job as picked up for mcp_server.py
-        except OSError:  # mcp_server.py gave up on it in the meantime
+            os.rename(job, run)
+        except OSError:
             continue
         try:
             run_job(run, out)
@@ -49,9 +45,9 @@ def poll_once(spool, run_job):
             pass
 
 
-def _run_in_kernel(run, out):
-    # execfile on every job, so edits to mcp_kernel.py apply without restarting CAE
-    sendCommand('execfile(%r); _mcp_run(%r, %r)' % (KERNEL, run, out))
+def _reload_kernel_and_run(run, out):
+    # a fresh dict per job, so the kernel's imports and helpers never shadow names in the CAE namespace
+    sendCommand('(lambda ns: (execfile(%r, ns), ns["_mcp_run"](%r, %r)))({})' % (KERNEL, run, out))
 
 
 if FXObject is not None:
@@ -68,7 +64,7 @@ if FXObject is not None:
 
         def onTick(self, sender, sel, ptr):
             try:
-                poll_once(SPOOL, _run_in_kernel)
+                poll_once(SPOOL, _reload_kernel_and_run)
             except Exception:
                 _log(traceback.format_exc())
             self.arm()
@@ -76,9 +72,9 @@ if FXObject is not None:
 
     if not os.path.isdir(SPOOL):
         os.makedirs(SPOOL)
-    _mcp_poller = McpPoller()  # module global keeps it alive
+    _mcp_poller_keepalive = McpPoller()
     try:
-        _mcp_poller.arm()
+        _mcp_poller_keepalive.arm()
         _log('bridge started')
     except Exception:
         _log('bridge failed to start:\n' + traceback.format_exc())

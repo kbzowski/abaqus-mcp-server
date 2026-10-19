@@ -1,6 +1,3 @@
-# Runs one job inside the Abaqus/CAE kernel (where mdb and session live).
-# Loaded with execfile by mcp_bridge_plugin.py, so it must work on Abaqus's
-# Python 2.7 as well as on Python 3 (tests).
 import json, os, sys, traceback
 try:
     from StringIO import StringIO
@@ -9,8 +6,6 @@ except ImportError:
 
 
 class _McpTee(object):
-    """Captures into buf and echoes to the CAE message area (echo is best effort)."""
-
     def __init__(self, echo, buf):
         self.echo, self.buf = echo, buf
 
@@ -18,7 +13,7 @@ class _McpTee(object):
         self.buf.write(s)
         try:
             self.echo.write(s)
-        except Exception:  # e.g. a character the console encoding cannot represent
+        except Exception:
             pass
 
     def flush(self):
@@ -29,10 +24,8 @@ class _McpTee(object):
 
 
 def _mcp_run(job, out, namespace=None):
-    """Execute job (UTF-8 source file), write {"ok", "output"} JSON to out."""
     if namespace is None:
         import __main__
-        # same namespace as the CAE command line, so variables persist between jobs
         namespace = __main__.__dict__
     buf = StringIO()
     old = sys.stdout, sys.stderr
@@ -43,7 +36,7 @@ def _mcp_run(job, out, namespace=None):
         with open(job, 'rb') as f:
             code = f.read().decode('utf-8')
         exec(compile(code, job, 'exec'), namespace)
-    except:  # anything the script raises, including SystemExit, is its result
+    except BaseException:
         ok = False
         traceback.print_exc()
     finally:

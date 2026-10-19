@@ -10,8 +10,7 @@ Inspired by [jianzhichun/abaqus-mcp-server](https://github.com/jianzhichun/abaqu
 
 ## Setup
 
-1. Copy both files from `abaqus_plugin/` to `~/abaqus_plugins/` and restart Abaqus/CAE. `~/.abaqus_mcp/bridge.log` should say `bridge started`.
-2. Add the server to `.mcp.json`:
+1. Add the server to `.mcp.json`:
 
 ```json
 {
@@ -24,8 +23,12 @@ Inspired by [jianzhichun/abaqus-mcp-server](https://github.com/jianzhichun/abaqu
 }
 ```
 
+2. Start Abaqus/CAE with the `launch_abaqus` tool. It copies `abaqus_plugin/*.py` to `~/abaqus_plugins/` first, so the bridge always matches the server. If you start CAE yourself, copy those files there by hand. `~/.abaqus_mcp/bridge.log` should say `bridge started`.
+
 ## Tools
 
+- `list_abaqus_installations()` lists installed versions found as `abq<version>.bat` in `?:\SIMULIA\Commands`, `?:\SIMULIA\*\Commands` and next to `abaqus` on PATH.
+- `launch_abaqus(version="", work_dir="", wait=180)` installs the plug-in, starts `abq<version>.bat cae` in `work_dir` (default: home folder) and waits until the bridge answers. `version` can be omitted when only one is installed.
 - `execute_script(python_code, timeout=600)` returns `[OK]` or `[FAILED]` followed by the script's output. Scripts run on Abaqus's own Python (2.7 in 6.14).
 - `describe(path)` is a read-only API lookup in the live session: docstring with the signature, `__members__`, repository keys and methods, e.g. `describe("mdb.models['Model-1'].HeatTransferStep")`. Only attribute and `[key]` paths are accepted, no calls. The installed Abaqus is the reference, which matters because the scripting API differs between versions.
 
