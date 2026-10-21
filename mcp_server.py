@@ -1,11 +1,14 @@
 from mcp.server.fastmcp import FastMCP
+import argparse
 import asyncio
 import glob
+import hmac
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 
@@ -19,9 +22,14 @@ PLUGIN_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "abaqus
 PLUGIN_TARGET = os.path.join(os.path.expanduser("~"), "abaqus_plugins")
 PICKUP_TIMEOUT_S = 10.0
 POLL_INTERVAL = 0.05
-# Where Abaqus installers put the per-version launchers abq<version>.bat (6.x: SIMULIA/Abaqus/Commands, 2016+: SIMULIA/Commands)
-COMMANDS_GLOBS = ["[C-Z]:/SIMULIA/Commands", "[C-Z]:/SIMULIA/*/Commands"]
-VERSION_LAUNCHER = re.compile(r"abq(\d\w*)\.bat", re.IGNORECASE)
+# Where Abaqus installers put the per-version launchers abq<version>.bat (6.x: SIMULIA/Abaqus/Commands, 2016+: SIMULIA/Commands);
+# on Linux they are abq<version> without extension
+COMMANDS_GLOBS = ["[C-Z]:/SIMULIA/Commands", "[C-Z]:/SIMULIA/*/Commands",
+                  "/var/DassaultSystemes/SIMULIA/Commands", "/usr/SIMULIA/Commands", "/opt/SIMULIA/Commands"]
+VERSION_LAUNCHER = re.compile(r"abq(\d\w*?)(\.bat)?", re.IGNORECASE)
+# no console window on Windows, own session on Linux, so closing the client's terminal does not kill Abaqus
+DETACH = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+          if os.name == "nt" else {"start_new_session": True})
 
 
 def _bridge_alive() -> bool:
@@ -87,7 +95,7 @@ def find_installations() -> dict[str, str]:
         dirs.append(os.path.dirname(on_path))
     found = {}
     for d in dirs:
-        for f in glob.glob(os.path.join(d, "abq*.bat")):
+        for f in glob.glob(os.path.join(d, "abq*")):
             m = VERSION_LAUNCHER.fullmatch(os.path.basename(f))
             if m:
                 found.setdefault(m.group(1), os.path.normpath(f))
@@ -96,7 +104,7 @@ def find_installations() -> dict[str, str]:
 
 @mcp.tool(
     name="list_abaqus_installations",
-    description="Lists the Abaqus versions installed on this computer with their launchers (abq<version>.bat). Use the version with launch_abaqus."
+    description="Lists the Abaqus versions installed on this computer with their launchers (abq<version>.bat, abq<version> on Linux). Use the version with launch_abaqus."
 )
 def list_abaqus_installations() -> str:
     return _format_installations(find_installations())
@@ -104,15 +112,15 @@ def list_abaqus_installations() -> str:
 
 def _format_installations(found: dict[str, str]) -> str:
     if not found:
-        return "No Abaqus installation found (looked for abq<version>.bat in SIMULIA/Commands folders and next to abaqus on PATH)."
+        return "No Abaqus installation found (looked for abq<version>[.bat] in SIMULIA/Commands folders and next to abaqus on PATH)."
     return "\n".join(f"{v}: {path}" for v, path in sorted(found.items()))
 
 
 @mcp.tool(
     name="launch_abaqus",
-    description="Starts Abaqus/CAE and waits until the mcp_bridge plug-in answers, so execute_script can be used right after. version is a key from list_abaqus_installations (optional when only one is installed). work_dir is where Abaqus writes its files (abaqus.rpy, jobs); default is the user's home folder."
+    description="Starts Abaqus/CAE and waits until the mcp_bridge plug-in answers, so execute_script can be used right after. version is a key from list_abaqus_installations (optional when only one is installed). work_dir is where Abaqus writes its files (abaqus.rpy, jobs); default is the user's home folder. headless=True starts CAE without a window (noGUI): mdb, jobs and ODB work, the GUI does not; the process runs until it is killed."
 )
-async def launch_abaqus(version: str = "", work_dir: str = "", wait: float = 180.0) -> str:
+async def launch_abaqus(version: str = "", work_dir: str = "", wait: float = 180.0, headless: bool = False) -> str:
     if _bridge_alive() or _running_job():
         return "Abaqus/CAE with the bridge is already running."
     found = find_installations()
@@ -126,10 +134,12 @@ async def launch_abaqus(version: str = "", work_dir: str = "", wait: float = 180
     os.makedirs(PLUGIN_TARGET, exist_ok=True)
     for f in glob.glob(os.path.join(PLUGIN_SOURCE, "*.py")):
         shutil.copy(f, PLUGIN_TARGET)
+    cmd = [found[version], "cae"]
+    if headless:
+        cmd.append("noGUI=" + os.path.join(PLUGIN_TARGET, "mcp_nogui.py"))
     # no window and no inherited stdio: the MCP protocol runs over this server's stdout
-    proc = subprocess.Popen([found[version], "cae"], cwd=work_dir, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+    proc = subprocess.Popen(cmd, cwd=work_dir, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **DETACH)
     start = time.time()
     while time.time() - start < wait:
         if _bridge_alive():
@@ -195,5 +205,44 @@ def abaqus_scripting_strategy() -> str:
     """
 
 
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+MIN_TOKEN_LEN = 16
+
+
+def require_token(app, token: str):
+    """ASGI wrapper: every HTTP request must carry Authorization: Bearer <token>."""
+    expected = f"Bearer {token}".encode()
+
+    async def guarded(scope, receive, send):
+        if scope["type"] == "http" and not hmac.compare_digest(dict(scope["headers"]).get(b"authorization", b""), expected):
+            await send({"type": "http.response.start", "status": 401, "headers": [(b"www-authenticate", b"Bearer")]})
+            await send({"type": "http.response.body", "body": b"Unauthorized"})
+            return
+        await app(scope, receive, send)
+    return guarded
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Abaqus MCP server (stdio by default).")
+    parser.add_argument("--http", action="store_true", help="serve MCP over streamable HTTP at /mcp instead of stdio")
+    parser.add_argument("--host", default="127.0.0.1", help="address to listen on with --http (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8000, help="port with --http (default: 8000)")
+    args = parser.parse_args(argv)
+    if not args.http:
+        mcp.run()
+        return
+    token = os.environ.get("ABAQUS_MCP_TOKEN", "")
+    if token and len(token) < MIN_TOKEN_LEN:
+        sys.exit(f"ABAQUS_MCP_TOKEN must have at least {MIN_TOKEN_LEN} characters.")
+    if args.host not in LOOPBACK:
+        if not token:
+            sys.exit(f"Listening on {args.host} runs any client's code in Abaqus: set ABAQUS_MCP_TOKEN first.")
+        # the SDK's Host-header check only allows localhost names; on a public address the token guards access instead
+        mcp.settings.transport_security = None
+    import uvicorn
+    app = mcp.streamable_http_app()
+    uvicorn.run(require_token(app, token) if token else app, host=args.host, port=args.port)
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
